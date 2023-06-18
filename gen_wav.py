@@ -6,7 +6,7 @@ from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 import argparse
 import soundfile
-device = 'cpu' # change to 'cpu‘ if you do not have gpu. generating with cpu is very slow.
+device = 'cuda' # change to 'cpu‘ if you do not have gpu. generating with cpu is very slow.
 SAMPLE_RATE = 16000
 
 def parse_args():
@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument(
         "--save_name",
         type=str,
-        default='test', # if it's 1, only condition is taken into consideration
+        default='test', 
         help="audio path name for saving",
     ) 
     return parser.parse_args()
@@ -81,8 +81,8 @@ def gen_wav(sampler,vocoder,prompt,ddim_steps,scale,duration,n_samples):
     uc = None
     if scale != 1.0:
         uc = sampler.model.get_learned_conditioning(n_samples * [""])
-    c = sampler.model.get_learned_conditioning(n_samples * [prompt])# shape:[1,77,1280],即还没有变成句子embedding，仍是每个单词的embedding
-    shape = [sampler.model.first_stage_model.embed_dim, 10, latent_width]  # (z_dim, 80//2^x, 848//2^x)
+    c = sampler.model.get_learned_conditioning(n_samples * [prompt])
+    shape = [sampler.model.first_stage_model.embed_dim, 10, latent_width]  # 10 is latent height 
     samples_ddim, _ = sampler.sample(S=ddim_steps,
                                         conditioning=c,
                                         batch_size=n_samples,
