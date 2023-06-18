@@ -6,7 +6,7 @@ from ldm.util import instantiate_from_config
 from omegaconf import OmegaConf
 import argparse
 import soundfile
-device = 'cpu' # change to 'cpu‘ if you do not have gpu. generating with cpu is very slow.
+device = 'cuda' # change to 'cpu‘ if you do not have gpu. generating with cpu is very slow.
 SAMPLE_RATE = 16000
 
 def parse_args():
