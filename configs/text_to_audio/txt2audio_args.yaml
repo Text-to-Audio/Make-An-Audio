@@ -72,7 +72,7 @@ model:
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLAPEmbedder
       params:
-        weights_path: useful_ckpts/CLAP/CLAP_weights_2022.pth
+        weights_path: # useful_ckpts/CLAP/CLAP_weights_2022.pth
 
 ckpt_path: useful_ckpts/maa1_caps.ckpt
 

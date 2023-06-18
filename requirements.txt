@@ -16,5 +16,5 @@ pandas
 torchlibrosa
 transformers
 ftfy
-pytorch-lightning==1.5.9
+pytorch-lightning==1.7.0
 # -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers

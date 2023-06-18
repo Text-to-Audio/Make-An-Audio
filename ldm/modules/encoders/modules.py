@@ -172,14 +172,14 @@ class FrozenT5Embedder(AbstractEncoder):
 
 class FrozenCLAPEmbedder(AbstractEncoder):
     """Uses the CLAP transformer encoder for text (from huggingface)"""
-    def __init__(self, weights_path, freeze=True, device="cuda", max_length=77):  # clip-vit-base-patch32
+    def __init__(self, weights_path=None, freeze=True, device="cuda", max_length=77):  # clip-vit-base-patch32
         super().__init__()
-
-        model_state_dict = torch.load(weights_path, map_location=torch.device('cpu'))['model']
-        match_params = dict()
-        for key in list(model_state_dict.keys()):
-            if 'caption_encoder' in key:
-                match_params[key.replace('caption_encoder.', '')] = model_state_dict[key]
+        if weights_path:
+            model_state_dict = torch.load(weights_path, map_location=torch.device('cpu'))['model']
+            match_params = dict()
+            for key in list(model_state_dict.keys()):
+                if 'caption_encoder' in key:
+                    match_params[key.replace('caption_encoder.', '')] = model_state_dict[key]
 
         config_as_str = files('ldm').joinpath('modules/encoders/CLAP/config.yml').read_text()
         args = read_config_as_args(config_as_str, is_config_str=True)
