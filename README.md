@@ -37,8 +37,9 @@ python gen_wav.py --prompt "a bird chirps" --ddim_steps 100 --duration 10 --scal
 ```
 
 # TODO
+- [ ] Release Training code
+- [ ] Release Evaluation code
 - [ ] Make Make-An-Audio available on Diffuser
-
 ## Cite this work
 
 If you found this tool useful, please consider citing
