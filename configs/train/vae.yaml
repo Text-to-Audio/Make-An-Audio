@@ -39,7 +39,7 @@ lightning:
         sample_rate: 16000
         for_specs: true
         increase_log_steps: false
-        batch_frequency: 1
+        batch_frequency: 5000
         max_images: 8
         melvmin: -5
         melvmax: 1.5
@@ -55,7 +55,7 @@ lightning:
 data:
   target: main.SpectrogramDataModuleFromConfig
   params:
-    batch_size: 1
+    batch_size: 4
     num_workers: 16
     spec_dir_path: data
     spec_crop_len: 624
