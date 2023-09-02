@@ -1,5 +1,12 @@
 *.pyc
 __pycache__
-useful_ckpts/tmp
+useful_ckpts/
 evaluation
 .idea/
+logs
+audiocaps_gen
+audioldm_eval
+src
+processed
+run.sh
+*.DS_Store

@@ -1,0 +1,71 @@
+model:
+  base_learning_rate: 4.5e-06
+  target: ldm.models.autoencoder.AutoencoderKL
+  params:
+    monitor: val/rec_loss
+    embed_dim: 4
+    ddconfig:
+      double_z: true
+      z_channels: 4
+      resolution: 624
+      in_channels: 1
+      out_ch: 1
+      ch: 128
+      ch_mult:
+      - 1
+      - 2
+      - 2
+      - 4
+      num_res_blocks: 2
+      attn_resolutions:
+      - 78
+      - 156
+      dropout: 0.0
+    lossconfig:
+      target: ldm.modules.losses_audio.contperceptual.LPAPSWithDiscriminator
+      params:
+        disc_start: 50001
+        kl_weight: 1.0e-06
+        perceptual_weight: 0.0
+        disc_weight: 0.5
+        disc_in_channels: 1
+        disc_conditional: false
+
+lightning:
+  callbacks:
+    image_logger:
+      target: main.AudioLogger
+      params:
+        sample_rate: 16000
+        for_specs: true
+        increase_log_steps: false
+        batch_frequency: 1
+        max_images: 8
+        melvmin: -5
+        melvmax: 1.5
+        vocoder_cfg:
+          target: vocoder.bigvgan.models.VocoderBigVGAN
+          params:
+            ckpt_vocoder: useful_ckpts/bigvnat
+  trainer:
+    strategy: ddp
+    gpus: 0,1,2,3,4,5,6,7
+
+  
+data:
+  target: main.SpectrogramDataModuleFromConfig
+  params:
+    batch_size: 1
+    num_workers: 16
+    spec_dir_path: data
+    spec_crop_len: 624
+    drop: 0.1
+    train:
+      target: ldm.data.joinaudiodataset_624.JoinSpecsTrain
+      params:
+        specs_dataset_cfg: null
+    validation:
+      target: ldm.data.joinaudiodataset_624.JoinSpecsValidation
+      params:
+        specs_dataset_cfg: null
+

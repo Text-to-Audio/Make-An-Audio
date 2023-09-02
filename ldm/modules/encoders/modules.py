@@ -244,46 +244,6 @@ class FrozenCLAPEmbedderNoLoad(AbstractEncoder):
         return z
 
 
-class NewFrozenCLAPEmbedder(AbstractEncoder):
-    """Uses the CLAP transformer encoder for text (from huggingface)"""
-    def __init__(self, weights_path, freeze=True, device="cuda", max_length=77):  # clip-vit-base-patch32
-        super().__init__()
-        # To device
-        from transformers import RobertaTokenizer
-        from ldm.modules.encoders.open_clap import create_model
-
-
-        model, model_cfg = create_model(
-            'HTSAT-tiny',
-            'roberta',
-            weights_path,
-            enable_fusion=True,
-            fusion_type='aff_2d'
-        )
-
-        del model.audio_branch, model.audio_transform, model.audio_projection
-        self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
-        self.model = model
-
-        self.max_length = max_length
-        self.device = device
-        if freeze: self.freeze()
-
-        param_num = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f'{self.model.__class__.__name__} comes with: {param_num / 1e+6:.3f} M params.')
-
-    def freeze(self):
-        self.model = self.model.eval()
-        for param in self.model.parameters():
-            param.requires_grad = False
-
-    def encode(self, text):
-        batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, return_length=True,
-                                        return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
-        outputs = self.model.text_branch(input_ids=batch_encoding["input_ids"].to(self.device), attention_mask=batch_encoding["attention_mask"].to(self.device))
-        z = self.model.text_projection(outputs.last_hidden_state)
-        return z
-
 class FrozenFLANEmbedder(AbstractEncoder):
     """Uses the T5 transformer encoder for text"""
     def __init__(self, version="google/flan-t5-large", device="cuda", max_length=77, freeze=True):  # others are google/t5-v1_1-xl and google/t5-v1_1-xxl

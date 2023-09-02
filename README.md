@@ -49,11 +49,51 @@ See requirements in `requirement.txt`:
 ```bash
 python gen_wav.py --prompt "a bird chirps" --ddim_steps 100 --duration 10 --scale 3 --n_samples 1 --save_name "results"
 ```
+# Train
+## dataset preparation
+We can't provide the dataset download link for copyright issues. We provide the process code to generate melspec.  
+Before training, we need to construct the dataset information into a tsv file, which includes name (id for each audio), dataset (which dataset the audio belongs to), audio_path (the path of .wav file),caption (the caption of the audio) ,mel_path (the processed melspec file path of each audio). We provide a tsv file of audiocaps test set: ./data/audiocaps_test.tsv as a sample.
+### generate the melspec file of audio
+Assume you have already got a tsv file to link each caption to its audio_path, which mean the tsv_file have "name","audio_path","dataset" and "caption" columns in it.
+To get the melspec of audio, run the following command, which will save mels in ./processed
+```bash
+python preprocess/mel_spec.py --tsv_path tmp.tsv --num_gpus 1 --max_duration 10
+```
+## Train variational autoencoder
+Assume we have processed several datasets, and save the .tsv files in data/*.tsv . Replace **data.params.spec_dir_path** with the **data**(the directory that contain tsvs) in the config file. Then we can train VAE with the following command. If you don't have 8 gpus in your machine, you can replace --gpus 0,1,...,gpu_nums
+```bash
+python main.py --base configs/train/vae.yaml -t --gpus 0,1,2,3,4,5,6,7
+```
+The training result will be save in ./logs/
+## train latent diffsuion
+After Trainning VAE, replace model.params.first_stage_config.params.ckpt_path with your trained VAE checkpoint path in the config file.
+Run the following command to train Diffusion model
+```bash
+python main.py --base configs/train/diffusion.yaml -t  --gpus 0,1,2,3,4,5,6,7
+```
+The training result will be save in ./logs/
+# Evaluation
+## generate audiocaps samples
+```bash
+python gen_wavs_by_tsv.py --tsv_path data/audiocaps_test.tsv --save_dir audiocaps_gen
+```
+
+## calculate FD,FAD,IS,KL
+install [audioldm_eval](https://github.com/haoheliu/audioldm_eval) by
+```bash
+git clone git@github.com:haoheliu/audioldm_eval.git
+```
+Then test with:
+```bash
+python scripts/test.py --pred_wavsdir {the directory that saves the audios you generated} --gt_wavsdir {the directory that saves audiocaps test set waves}
+```
+## calculate Clap_score
+```bash
+python wav_evaluation/cal_clap_score.py --tsv_path {the directory that saves the audios you generated}/result.tsv
+```
 
 
 # TODO
-- [ ] Release Training code
-- [ ] Release Evaluation code
 - [ ] Make Make-An-Audio available on Diffuser
 
 ## Acknowledgements

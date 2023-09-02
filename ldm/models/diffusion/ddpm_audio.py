@@ -5,24 +5,19 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
-import os
 import torch
 import torch.nn as nn
 import numpy as np
-import pytorch_lightning as pl
 from torch.optim.lr_scheduler import LambdaLR
 from einops import rearrange, repeat
-from contextlib import contextmanager
-from functools import partial
 from tqdm import tqdm
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.distributed import rank_zero_only
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
-from ldm.modules.ema import LitEma
 from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianDistribution
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
-from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
+from ldm.modules.diffusionmodules.util import extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.ddpm import DDPM, disabled_train
 from omegaconf import ListConfig
@@ -90,7 +85,7 @@ class LatentDiffusion_audio(DDPM):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, batch, batch_idx):
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -99,11 +94,18 @@ class LatentDiffusion_audio(DDPM):
             x = super().get_input(batch, self.first_stage_key)
             x = x.to(self.device)
             encoder_posterior = self.encode_first_stage(x)
-            z = self.get_first_stage_encoding(encoder_posterior).detach()
+            z = self.get_first_stage_encoding(encoder_posterior).detach()# get latent
             del self.scale_factor
-            self.register_buffer('scale_factor', 1. / z.flatten().std())
+            self.register_buffer('scale_factor', 1. / z.flatten().std())# 1/latent.std， get_first_stage_encoding returns self.scale_factor * latent
             print(f"setting self.scale_factor to {self.scale_factor}")
             print("### USING STD-RESCALING ###")
+
+    # def on_train_epoch_start(self):
+    #     print("!!!!!!!!!!!!!!!!!!!!!!!!!!on_train_epoch_strat",self.trainer.train_dataloader.batch_sampler,hasattr(self.trainer.train_dataloader.batch_sampler,'set_epoch'))
+    #     if hasattr(self.trainer.train_dataloader.batch_sampler,'set_epoch'):
+    #         self.trainer.train_dataloader.batch_sampler.set_epoch(self.current_epoch)
+    #     return super().on_train_epoch_start()
+
 
     def register_schedule(self,
                           given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -129,7 +131,6 @@ class LatentDiffusion_audio(DDPM):
             elif config == "__is_unconditional__":
                 print(f"Training {self.__class__.__name__} as an unconditional model.")
                 self.cond_stage_model = None
-                # self.be_unconditional = True
             else:
                 model = instantiate_from_config(config)
                 self.cond_stage_model = model.eval()
@@ -148,6 +149,8 @@ class LatentDiffusion_audio(DDPM):
             denoise_row.append(self.decode_first_stage(zd.to(self.device),
                                                             force_not_quantize=force_no_decoder_quantization))
         n_imgs_per_row = len(denoise_row)
+        if len(denoise_row[0].shape) == 3:
+            denoise_row = [x.unsqueeze(1) for x in denoise_row]
         denoise_row = torch.stack(denoise_row)  # n_log_step, n_row, C, H, W
         denoise_grid = rearrange(denoise_row, 'n b c h w -> b n c h w')
         denoise_grid = rearrange(denoise_grid, 'b n c h w -> (b n) c h w')
@@ -163,6 +166,7 @@ class LatentDiffusion_audio(DDPM):
             raise NotImplementedError(f"encoder_posterior of type '{type(encoder_posterior)}' not yet implemented")
         return self.scale_factor * z
 
+    #@profile
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
@@ -358,55 +362,11 @@ class LatentDiffusion_audio(DDPM):
 
         z = 1. / self.scale_factor * z
 
-        if hasattr(self, "split_input_params"):
-            if self.split_input_params["patch_distributed_vq"]:
-                ks = self.split_input_params["ks"]  # eg. (128, 128)
-                stride = self.split_input_params["stride"]  # eg. (64, 64)
-                uf = self.split_input_params["vqf"]
-                bs, nc, h, w = z.shape
-                if ks[0] > h or ks[1] > w:
-                    ks = (min(ks[0], h), min(ks[1], w))
-                    print("reducing Kernel")
 
-                if stride[0] > h or stride[1] > w:
-                    stride = (min(stride[0], h), min(stride[1], w))
-                    print("reducing stride")
-
-                fold, unfold, normalization, weighting = self.get_fold_unfold(z, ks, stride, uf=uf)
-
-                z = unfold(z)  # (bn, nc * prod(**ks), L)
-                # 1. Reshape to img shape
-                z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
-
-                # 2. apply model loop over last dim
-                if isinstance(self.first_stage_model, VQModelInterface):
-                    output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
-                                                                 force_not_quantize=predict_cids or force_not_quantize)
-                                   for i in range(z.shape[-1])]
-                else:
-
-                    output_list = [self.first_stage_model.decode(z[:, :, :, :, i])
-                                   for i in range(z.shape[-1])]
-
-                o = torch.stack(output_list, axis=-1)  # # (bn, nc, ks[0], ks[1], L)
-                o = o * weighting
-                # Reverse 1. reshape to img shape
-                o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
-                # stitch crops together
-                decoded = fold(o)
-                decoded = decoded / normalization  # norm is shape (1, 1, h, w)
-                return decoded
-            else:
-                if isinstance(self.first_stage_model, VQModelInterface):
-                    return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-                else:
-                    return self.first_stage_model.decode(z)
-
+        if isinstance(self.first_stage_model, VQModelInterface):
+            return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
         else:
-            if isinstance(self.first_stage_model, VQModelInterface):
-                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-            else:
-                return self.first_stage_model.decode(z)
+            return self.first_stage_model.decode(z)
 
     # same as above but without decorator
     def differentiable_decode_first_stage(self, z, predict_cids=False, force_not_quantize=False):
@@ -418,95 +378,15 @@ class LatentDiffusion_audio(DDPM):
 
         z = 1. / self.scale_factor * z
 
-        if hasattr(self, "split_input_params"):
-            if self.split_input_params["patch_distributed_vq"]:
-                ks = self.split_input_params["ks"]  # eg. (128, 128)
-                stride = self.split_input_params["stride"]  # eg. (64, 64)
-                uf = self.split_input_params["vqf"]
-                bs, nc, h, w = z.shape
-                if ks[0] > h or ks[1] > w:
-                    ks = (min(ks[0], h), min(ks[1], w))
-                    print("reducing Kernel")
 
-                if stride[0] > h or stride[1] > w:
-                    stride = (min(stride[0], h), min(stride[1], w))
-                    print("reducing stride")
-
-                fold, unfold, normalization, weighting = self.get_fold_unfold(z, ks, stride, uf=uf)
-
-                z = unfold(z)  # (bn, nc * prod(**ks), L)
-                # 1. Reshape to img shape
-                z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
-
-                # 2. apply model loop over last dim
-                if isinstance(self.first_stage_model, VQModelInterface):  
-                    output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
-                                                                 force_not_quantize=predict_cids or force_not_quantize)
-                                   for i in range(z.shape[-1])]
-                else:
-
-                    output_list = [self.first_stage_model.decode(z[:, :, :, :, i])
-                                   for i in range(z.shape[-1])]
-
-                o = torch.stack(output_list, axis=-1)  # # (bn, nc, ks[0], ks[1], L)
-                o = o * weighting
-                # Reverse 1. reshape to img shape
-                o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
-                # stitch crops together
-                decoded = fold(o)
-                decoded = decoded / normalization  # norm is shape (1, 1, h, w)
-                return decoded
-            else:
-                if isinstance(self.first_stage_model, VQModelInterface):
-                    return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-                else:
-                    return self.first_stage_model.decode(z)
-
+        if isinstance(self.first_stage_model, VQModelInterface):
+            return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
         else:
-            if isinstance(self.first_stage_model, VQModelInterface):
-                return self.first_stage_model.decode(z, force_not_quantize=predict_cids or force_not_quantize)
-            else:
-                return self.first_stage_model.decode(z)
+            return self.first_stage_model.decode(z)
 
     @torch.no_grad()
     def encode_first_stage(self, x):
-        if hasattr(self, "split_input_params"):
-            if self.split_input_params["patch_distributed_vq"]:
-                ks = self.split_input_params["ks"]  # eg. (128, 128)
-                stride = self.split_input_params["stride"]  # eg. (64, 64)
-                df = self.split_input_params["vqf"]
-                self.split_input_params['original_image_size'] = x.shape[-2:]
-                bs, nc, h, w = x.shape
-                if ks[0] > h or ks[1] > w:
-                    ks = (min(ks[0], h), min(ks[1], w))
-                    print("reducing Kernel")
-
-                if stride[0] > h or stride[1] > w:
-                    stride = (min(stride[0], h), min(stride[1], w))
-                    print("reducing stride")
-
-                fold, unfold, normalization, weighting = self.get_fold_unfold(x, ks, stride, df=df)
-                z = unfold(x)  # (bn, nc * prod(**ks), L)
-                # Reshape to img shape
-                z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
-
-                output_list = [self.first_stage_model.encode(z[:, :, :, :, i])
-                               for i in range(z.shape[-1])]
-
-                o = torch.stack(output_list, axis=-1)
-                o = o * weighting
-
-                # Reverse reshape to img shape
-                o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
-                # stitch crops together
-                decoded = fold(o)
-                decoded = decoded / normalization
-                return decoded
-
-            else:
-                return self.first_stage_model.encode(x)
-        else:
-            return self.first_stage_model.encode(x)
+        return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
         x, c = self.get_input(batch, self.first_stage_key)
@@ -514,27 +394,26 @@ class LatentDiffusion_audio(DDPM):
         return loss
 
     def test_step(self,batch,batch_idx):
-        cond = batch[self.cond_stage_key] * self.test_repeat
+        cond = batch[self.cond_stage_key] #  * self.test_repeat
         cond = self.get_learned_conditioning(cond) # c: string -> [B, T, Context_dim]
         batch_size = len(cond)
-        enc_emb = self.sample(cond,batch_size,timesteps=self.test_numsteps)# shape = [batch_size,self.channels,self.mel_dim,self.mel_length]
+        enc_emb = self.sample(cond,batch_size,timesteps=self.num_timesteps)# shape = [batch_size,self.channels,self.mel_dim,self.mel_length]
         xrec = self.decode_first_stage(enc_emb)
-        reconstructions = (xrec + 1)/2 # to mel scale
-        test_ckpt_path = os.path.basename(self.trainer.tested_ckpt_path)
-        savedir = os.path.join(self.trainer.log_dir,f'output_imgs_{test_ckpt_path}','fake_class')
-        if not os.path.exists(savedir):
-            os.makedirs(savedir)
+        # reconstructions = (xrec + 1)/2 # to mel scale
+        # test_ckpt_path = os.path.basename(self.trainer.tested_ckpt_path)
+        # savedir = os.path.join(self.trainer.log_dir,f'output_imgs_{test_ckpt_path}','fake_class')
+        # if not os.path.exists(savedir):
+        #     os.makedirs(savedir)
 
-        file_names = batch['f_name']
-        nfiles = len(file_names)
-        reconstructions = reconstructions.cpu().numpy().squeeze(1) # squuze channel dim
-        for k in range(reconstructions.shape[0]):
-            b,repeat = k % nfiles, k // nfiles
-            vname_num_split_index = file_names[b].rfind('_')# file_names[b]:video_name+'_'+num
-            v_n,num = file_names[b][:vname_num_split_index],file_names[b][vname_num_split_index+1:]
-            save_img_path = os.path.join(savedir,f'{v_n}_sample_{num}_{repeat}.npy')# the num_th caption, the repeat_th repitition
-            np.save(save_img_path,reconstructions[b])
-        
+        # file_names = batch['f_name']
+        # nfiles = len(file_names)
+        # reconstructions = reconstructions.cpu().numpy().squeeze(1) # squuze channel dim
+        # for k in range(reconstructions.shape[0]):
+        #     b,repeat = k % nfiles, k // nfiles
+        #     vname_num_split_index = file_names[b].rfind('_')# file_names[b]:video_name+'_'+num
+        #     v_n,num = file_names[b][:vname_num_split_index],file_names[b][vname_num_split_index+1:]
+        #     save_img_path = os.path.join(savedir,f'{v_n}_sample_{num}_{repeat}.npy')# the num_th caption, the repeat_th repitition
+        #     np.save(save_img_path,reconstructions[b])
         return None
 
     def forward(self, x, c, *args, **kwargs):
@@ -548,113 +427,26 @@ class LatentDiffusion_audio(DDPM):
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
         return self.p_losses(x, c, t, *args, **kwargs)
 
-    def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
-        def rescale_bbox(bbox):
-            x0 = clamp((bbox[0] - crop_coordinates[0]) / crop_coordinates[2])
-            y0 = clamp((bbox[1] - crop_coordinates[1]) / crop_coordinates[3])
-            w = min(bbox[2] / crop_coordinates[2], 1 - x0)
-            h = min(bbox[3] / crop_coordinates[3], 1 - y0)
-            return x0, y0, w, h
-
-        return [rescale_bbox(b) for b in bboxes]
 
     def apply_model(self, x_noisy, t, cond, return_ids=False):
 
         if isinstance(cond, dict):
             # hybrid case, cond is exptected to be a dict
-            pass
+            key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
+            cond = {key: cond}
         else:
             if not isinstance(cond, list):
                 cond = [cond]
-            key = 'c_concat' if self.model.conditioning_key == 'concat' else 'c_crossattn'
+            if self.model.conditioning_key == "concat":
+                key = "c_concat"
+            elif self.model.conditioning_key == "crossattn":
+                key = "c_crossattn"
+            else:
+                key = "c_film"
             cond = {key: cond}
 
-        if hasattr(self, "split_input_params"):
-            assert len(cond) == 1  # todo can only deal with one conditioning atm
-            assert not return_ids  
-            ks = self.split_input_params["ks"]  # eg. (128, 128)
-            stride = self.split_input_params["stride"]  # eg. (64, 64)
 
-            h, w = x_noisy.shape[-2:]
-
-            fold, unfold, normalization, weighting = self.get_fold_unfold(x_noisy, ks, stride)
-
-            z = unfold(x_noisy)  # (bn, nc * prod(**ks), L)
-            # Reshape to img shape
-            z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
-            z_list = [z[:, :, :, :, i] for i in range(z.shape[-1])]
-
-            if self.cond_stage_key in ["image", "LR_image", "segmentation",
-                                       'bbox_img'] and self.model.conditioning_key:  # todo check for completeness
-                c_key = next(iter(cond.keys()))  # get key
-                c = next(iter(cond.values()))  # get value
-                assert (len(c) == 1)  # todo extend to list with more than one elem
-                c = c[0]  # get element
-
-                c = unfold(c)
-                c = c.view((c.shape[0], -1, ks[0], ks[1], c.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
-
-                cond_list = [{c_key: [c[:, :, :, :, i]]} for i in range(c.shape[-1])]
-
-            elif self.cond_stage_key == 'coordinates_bbox':
-                assert 'original_image_size' in self.split_input_params, 'BoudingBoxRescaling is missing original_image_size'
-
-                # assuming padding of unfold is always 0 and its dilation is always 1
-                n_patches_per_row = int((w - ks[0]) / stride[0] + 1)
-                full_img_h, full_img_w = self.split_input_params['original_image_size']
-                # as we are operating on latents, we need the factor from the original image size to the
-                # spatial latent size to properly rescale the crops for regenerating the bbox annotations
-                num_downs = self.first_stage_model.encoder.num_resolutions - 1
-                rescale_latent = 2 ** (num_downs)
-
-                # get top left postions of patches as conforming for the bbbox tokenizer, therefore we
-                # need to rescale the tl patch coordinates to be in between (0,1)
-                tl_patch_coordinates = [(rescale_latent * stride[0] * (patch_nr % n_patches_per_row) / full_img_w,
-                                         rescale_latent * stride[1] * (patch_nr // n_patches_per_row) / full_img_h)
-                                        for patch_nr in range(z.shape[-1])]
-
-                # patch_limits are tl_coord, width and height coordinates as (x_tl, y_tl, h, w)
-                patch_limits = [(x_tl, y_tl,
-                                 rescale_latent * ks[0] / full_img_w,
-                                 rescale_latent * ks[1] / full_img_h) for x_tl, y_tl in tl_patch_coordinates]
-                # patch_values = [(np.arange(x_tl,min(x_tl+ks, 1.)),np.arange(y_tl,min(y_tl+ks, 1.))) for x_tl, y_tl in tl_patch_coordinates]
-
-                # tokenize crop coordinates for the bounding boxes of the respective patches
-                patch_limits_tknzd = [torch.LongTensor(self.bbox_tokenizer._crop_encoder(bbox))[None].to(self.device)
-                                      for bbox in patch_limits]  # list of length l with tensors of shape (1, 2)
-                print(patch_limits_tknzd[0].shape)
-                # cut tknzd crop position from conditioning
-                assert isinstance(cond, dict), 'cond must be dict to be fed into model'
-                cut_cond = cond['c_crossattn'][0][..., :-2].to(self.device)
-                print(cut_cond.shape)
-
-                adapted_cond = torch.stack([torch.cat([cut_cond, p], dim=1) for p in patch_limits_tknzd])
-                adapted_cond = rearrange(adapted_cond, 'l b n -> (l b) n')
-                print(adapted_cond.shape)
-                adapted_cond = self.get_learned_conditioning(adapted_cond)
-                print(adapted_cond.shape)
-                adapted_cond = rearrange(adapted_cond, '(l b) n d -> l b n d', l=z.shape[-1])
-                print(adapted_cond.shape)
-
-                cond_list = [{'c_crossattn': [e]} for e in adapted_cond]
-
-            else:
-                cond_list = [cond for i in range(z.shape[-1])]  # Todo make this more efficient
-
-            # apply model by loop over crops
-            output_list = [self.model(z_list[i], t, **cond_list[i]) for i in range(z.shape[-1])]
-            assert not isinstance(output_list[0],
-                                  tuple)  # todo cant deal with multiple model outputs check this never happens
-
-            o = torch.stack(output_list, axis=-1)
-            o = o * weighting
-            # Reverse reshape to img shape
-            o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
-            # stitch crops together
-            x_recon = fold(o) / normalization
-
-        else:
-            x_recon = self.model(x_noisy, t, **cond)
+        x_recon = self.model(x_noisy, t, **cond)
 
         if isinstance(x_recon, tuple) and not return_ids:
             return x_recon[0]
@@ -693,8 +485,9 @@ class LatentDiffusion_audio(DDPM):
             target = noise
         else:
             raise NotImplementedError()
-
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
+        
+        mean_dims = list(range(1,len(target.shape)))
+        loss_simple = self.get_loss(model_output, target, mean=False).mean(dim=mean_dims)
         loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar[t].to(self.device)
@@ -706,7 +499,7 @@ class LatentDiffusion_audio(DDPM):
 
         loss = self.l_simple_weight * loss.mean()
 
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
+        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=mean_dims)
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
         loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
         loss += (self.original_elbo_weight * loss_vlb)
@@ -888,7 +681,10 @@ class LatentDiffusion_audio(DDPM):
                verbose=True, timesteps=None, quantize_denoised=False,
                mask=None, x0=None, shape=None,**kwargs):
         if shape is None:
-            shape = (batch_size, self.channels, self.mel_dim, self.mel_length)
+            if self.channels > 0:
+                shape = (batch_size, self.channels, self.mel_dim, self.mel_length)
+            else:
+                shape = (batch_size, self.mel_dim, self.mel_length)
         if cond is not None:
             if isinstance(cond, dict):
                 cond = {key: cond[key][:batch_size] if not isinstance(cond[key], list) else
@@ -906,8 +702,8 @@ class LatentDiffusion_audio(DDPM):
 
         if ddim:
             ddim_sampler = DDIMSampler(self)
-            shape = (self.channels, self.mel_dim, self.mel_length)
-            samples, intermediates =ddim_sampler.sample(ddim_steps,batch_size,
+            shape = (self.channels, self.mel_dim, self.mel_length) if self.channels > 0 else (self.mel_dim, self.mel_length)
+            samples, intermediates = ddim_sampler.sample(ddim_steps,batch_size,
                                                         shape,cond,verbose=False,**kwargs)
 
         else:
@@ -919,7 +715,7 @@ class LatentDiffusion_audio(DDPM):
 
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
-                   quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=True,
+                   quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=True,
                    plot_diffusion_rows=True, **kwargs):
 
         use_ddim = ddim_steps is not None
@@ -929,11 +725,11 @@ class LatentDiffusion_audio(DDPM):
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
                                            return_original_cond=True,
-                                           bs=N)
+                                           bs=N) # z is latent,c is condition embedding, xc is condition(caption) list
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
-        log["inputs"] = x
-        log["reconstruction"] = xrec
+        log["inputs"] = x if len(x.shape)==4 else x.unsqueeze(1)
+        log["reconstruction"] = xrec if len(xrec.shape)==4 else xrec.unsqueeze(1)
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode") and self.cond_stage_key != "masked_image":
                 xc = self.cond_stage_model.decode(c)
@@ -943,15 +739,14 @@ class LatentDiffusion_audio(DDPM):
                 xc = self.cond_stage_model.decode(c[:, :self.cond_stage_model.embed_dim, :, :])
                 log["conditioning"] = xc
             elif self.cond_stage_key in ["caption"]:
-                xc = log_txt_as_img((256, 256), batch["caption"])
-                log["conditioning"] = xc
+                pass
+                # xc = log_txt_as_img((256, 256), batch["caption"])
+                # log["conditioning"] = xc
             elif self.cond_stage_key == 'class_label':
                 xc = log_txt_as_img((x.shape[2], x.shape[3]), batch["human_label"])
                 log['conditioning'] = xc
             elif isimage(xc):
                 log["conditioning"] = xc
-            if ismap(xc):
-                log["original_conditioning"] = self.to_rgb(xc)
 
         if plot_diffusion_rows:
             # get diffusion row
@@ -964,7 +759,8 @@ class LatentDiffusion_audio(DDPM):
                     noise = torch.randn_like(z_start)
                     z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
                     diffusion_row.append(self.decode_first_stage(z_noisy))
-
+            if len(diffusion_row[0].shape) == 3:
+                diffusion_row = [x.unsqueeze(1) for x in diffusion_row]
             diffusion_row = torch.stack(diffusion_row)  # n_log_step, n_row, C, H, W
             diffusion_grid = rearrange(diffusion_row, 'n b c h w -> b n c h w')
             diffusion_grid = rearrange(diffusion_grid, 'b n c h w -> (b n) c h w')
@@ -978,7 +774,7 @@ class LatentDiffusion_audio(DDPM):
                                                          ddim_steps=ddim_steps,eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
-            log["samples"] = x_samples
+            log["samples"] = x_samples if len(x_samples.shape)==4 else x_samples.unsqueeze(1)
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
@@ -993,7 +789,7 @@ class LatentDiffusion_audio(DDPM):
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
                 x_samples = self.decode_first_stage(samples.to(self.device))
-                log["samples_x0_quantized"] = x_samples
+                log["samples_x0_quantized"] = x_samples if len(x_samples.shape)==4 else x_samples.unsqueeze(1)
 
             if inpaint:
                 # make a simple center square
@@ -1021,8 +817,9 @@ class LatentDiffusion_audio(DDPM):
 
         if plot_progressive_rows:
             with self.ema_scope("Plotting Progressives"):
+                shape = (self.channels, self.mel_dim, self.mel_length) if self.channels > 0 else (self.mel_dim, self.mel_length)
                 img, progressives = self.progressive_denoising(c,
-                                                               shape=(self.channels, self.mel_dim, self.mel_length),
+                                                               shape=shape,
                                                                batch_size=N)
             prog_row = self._get_denoise_row_from_list(progressives, desc="Progressive Generation")
             log["progressive_row"] = prog_row
@@ -1057,15 +854,6 @@ class LatentDiffusion_audio(DDPM):
                 }]
             return [opt], scheduler
         return opt
-
-    @torch.no_grad()
-    def to_rgb(self, x):
-        x = x.float()
-        if not hasattr(self, "colorize"):
-            self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x)
-        x = nn.functional.conv2d(x, weight=self.colorize)
-        x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
-        return x
 
 
 class LatentFinetuneDiffusion(LatentDiffusion_audio):

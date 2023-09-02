@@ -1,4 +1,7 @@
+import os,sys
 import torch
+from tqdm import tqdm
+import pandas as pd
 import numpy as np
 from vocoder.bigvgan.models import VocoderBigVGAN
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -13,10 +16,15 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--prompt",
+        "--tsv_path",
         type=str,
-        default="a bird chirps",
-        help="the prompt to generate audio"
+        help="the tsv contains name and caption"
+    )
+
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        help="the directory contains wavs"
     )
 
     parser.add_argument(
@@ -71,8 +79,23 @@ def initialize_model(config, ckpt,device=device):
 def dur_to_size(duration):
     latent_width = int(duration * 7.8)
     if latent_width % 4 != 0:
-        latent_width = (latent_width // 4 + 1) * 4
+        latent_width = (latent_width // 4) * 4
     return latent_width
+
+def build_name2caption(tsv_path):
+    df = pd.read_csv(tsv_path,sep='\t')
+    name2cap = {}
+    name_count = {}
+    for t in df.itertuples():
+        name = getattr(t,'name')
+        caption = getattr(t,'caption')
+        if name not in name_count:
+            name_count[name] = 0 
+        else:
+            name_count[name]+=1
+        name2cap[name+f'_{name_count[name]}'] = caption
+
+    return name2cap
 
 def gen_wav(sampler,vocoder,prompt,ddim_steps,scale,duration,n_samples):
     latent_width = dur_to_size(duration)
@@ -104,10 +127,20 @@ def gen_wav(sampler,vocoder,prompt,ddim_steps,scale,duration,n_samples):
 
 if __name__ == '__main__':
     args = parse_args()
+    save_dir = args.save_dir
+    os.makedirs(save_dir,exist_ok=True)
+
     sampler = initialize_model('configs/text_to_audio/txt2audio_args.yaml', 'useful_ckpts/maa1_full.ckpt')
     vocoder = VocoderBigVGAN('useful_ckpts/bigvnat',device=device)
     print("Generating audios, it may takes a long time depending on your gpu performance")
-    wav_list = gen_wav(sampler,vocoder,prompt=args.prompt,ddim_steps=args.ddim_steps,scale=args.scale,duration=args.duration,n_samples=args.n_samples)
-    for idx,wav in enumerate(wav_list):
-        soundfile.write(f'{args.save_name}_{idx}.wav',wav,samplerate=SAMPLE_RATE)
-    print(f"audios are saved in {args.save_name}_i.wav")
+    name2cap = build_name2caption(args.tsv_path)
+    result = {'caption':[],'audio_path':[]}
+    for name,caption in tqdm(name2cap.items()):
+        wav_list = gen_wav(sampler,vocoder,prompt=caption,ddim_steps=args.ddim_steps,scale=args.scale,duration=args.duration,n_samples=1)
+        for idx,wav in enumerate(wav_list):
+            audio_path = f'{save_dir}/{name}.wav'
+            soundfile.write(audio_path,wav,samplerate=SAMPLE_RATE)
+            result['caption'].append(caption)
+            result['audio_path'].append(audio_path)
+    result = pd.DataFrame(result)
+    result.to_csv(f'{save_dir}/result.tsv',sep='\t',index=False)
