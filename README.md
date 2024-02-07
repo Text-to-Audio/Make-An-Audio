@@ -91,12 +91,11 @@ python scripts/test.py --pred_wavsdir {the directory that saves the audios you g
 ```bash
 python wav_evaluation/cal_clap_score.py --tsv_path {the directory that saves the audios you generated}/result.tsv
 ```
-# Audio2Audio
+# X-To-Audio
+## Audio2Audio
 ```bash
 python scripts/audio2audio.py  --prompt "a bird chirping"  --strength 0.3 --init-audio sample.wav --ckpt useful_ckpts/maa1_full.ckpt --vocoder_ckpt useful_ckpts/bigvgan --config configs/text_to_audio/txt2audio_args.yaml --outdir audio2audio_samples
 ```
-# TODO
-- [ ] Make Make-An-Audio available on Diffuser
 
 ## Acknowledgements
 This implementation uses parts of the code from the following Github repos:
