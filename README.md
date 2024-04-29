@@ -27,10 +27,13 @@ To try on your own dataset, simply clone this repo in your local machine provide
 ### Support Datasets and Pretrained Models
 
 Simply run following command to download the weights from [Google drive](https://drive.google.com/drive/folders/1zZTI3-nHrUIywKFqwxlFO6PjB66JA8jI?usp=drive_link).
+Download CLAP weights from [Hugging Face](https://huggingface.co/microsoft/msclap/blob/main/CLAP_weights_2022.pth).
+
 ```
 Download:
     maa1_full.ckpt and put it into ./useful_ckpts  
     BigVGAN vocoder and put it into ./useful_ckpts  
+    CLAP_weights_2022.pth and put it into ./useful_ckpts/CLAP
 ```
 The directory structure should be:
 ```
@@ -38,6 +41,9 @@ useful_ckpts/
 ├── bigvgan
 │   ├── args.yml
 │   └── best_netG.pt
+├── CLAP
+│   ├── config.yml
+│   └── CLAP_weights_2022.pth
 └── maa1_full.ckpt
 ```
 

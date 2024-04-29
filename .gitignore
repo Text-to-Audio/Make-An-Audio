@@ -1,6 +1,8 @@
 *.pyc
 *__pycache__
-useful_ckpts/
+useful_ckpts/bigvgan
+useful_ckpts/*.ckpt
+useful_ckpts/CLAP/*.ckpt
 evaluation
 .idea/
 logs
