@@ -105,7 +105,7 @@ def gen_wav(sampler,vocoder,prompt,ddim_steps,scale,duration,n_samples):
 if __name__ == '__main__':
     args = parse_args()
     sampler = initialize_model('configs/text_to_audio/txt2audio_args.yaml', 'useful_ckpts/maa1_full.ckpt')
-    vocoder = VocoderBigVGAN('useful_ckpts/bigvnat',device=device)
+    vocoder = VocoderBigVGAN('useful_ckpts/bigvgan',device=device)
     print("Generating audios, it may takes a long time depending on your gpu performance")
     wav_list = gen_wav(sampler,vocoder,prompt=args.prompt,ddim_steps=args.ddim_steps,scale=args.scale,duration=args.duration,n_samples=args.n_samples)
     for idx,wav in enumerate(wav_list):
